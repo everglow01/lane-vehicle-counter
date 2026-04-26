@@ -142,23 +142,60 @@ def count_vehicles_by_lane(vehicles, lane_result, bev_w):
     lane_counts = {li: 0 for li in range(lane_result.num_lanes)}
     veh_bev_xs = []
     for (x, y, bw, bh) in vehicles:
-        bot_center = np.array([[[x + bw / 2.0, y + bh]]], dtype=np.float32)
-        bev_pt = cv2.perspectiveTransform(bot_center, lane_result.H_mat)[0][0]
-        bev_x = float(bev_pt[0])
+        bottom_pts = np.array([[
+            [x, y + bh],
+            [x + bw, y + bh],
+            [x + bw / 2.0, y + bh],
+        ]], dtype=np.float32)
+        bev_pts = cv2.perspectiveTransform(bottom_pts, lane_result.H_mat)[0]
+        veh_left = float(min(bev_pts[0][0], bev_pts[1][0]))
+        veh_right = float(max(bev_pts[0][0], bev_pts[1][0]))
+        bev_x = float(bev_pts[2][0])
         veh_bev_xs.append(bev_x)
-        if not (0 <= bev_x < bev_w):
+
+        lane_idx = _assign_lane_by_overlap(
+            veh_left, veh_right, bev_x, lane_result.lane_boundaries_bev
+        )
+        if lane_idx is None:
             continue
-        for li in range(len(lane_result.lane_boundaries_bev) - 1):
-            if (lane_result.lane_boundaries_bev[li] <= bev_x <
-                    lane_result.lane_boundaries_bev[li + 1]):
-                lane_counts[li] += 1
-                break
+        lane_counts[lane_idx] += 1
 
     all_lane_counts = [lane_counts.get(li, 0) for li in range(lane_result.num_lanes)]
     print("[LaneCounts] " + "  ".join(
         f"车道{li + 1}={cnt}辆" for li, cnt in enumerate(all_lane_counts)
     ))
     return all_lane_counts, veh_bev_xs
+
+
+def _assign_lane_by_overlap(veh_left, veh_right, veh_center, lane_boundaries):
+    if len(lane_boundaries) < 2:
+        return None
+
+    overlaps = []
+    for li in range(len(lane_boundaries) - 1):
+        lane_left = lane_boundaries[li]
+        lane_right = lane_boundaries[li + 1]
+        overlap = max(0.0, min(veh_right, lane_right) - max(veh_left, lane_left))
+        overlaps.append(overlap)
+
+    best_overlap = max(overlaps)
+    if best_overlap > 0:
+        best_lanes = [li for li, overlap in enumerate(overlaps)
+                      if abs(overlap - best_overlap) < 1e-6]
+        if len(best_lanes) == 1:
+            return best_lanes[0]
+        return min(best_lanes, key=lambda li: _lane_center_dist(li, veh_center, lane_boundaries))
+
+    lane_centers = [
+        (lane_boundaries[li] + lane_boundaries[li + 1]) / 2.0
+        for li in range(len(lane_boundaries) - 1)
+    ]
+    return int(np.argmin([abs(veh_center - cx) for cx in lane_centers]))
+
+
+def _lane_center_dist(lane_idx, veh_center, lane_boundaries):
+    lane_center = (lane_boundaries[lane_idx] + lane_boundaries[lane_idx + 1]) / 2.0
+    return abs(veh_center - lane_center)
 
 
 def _detect_yellow_outer_line(yellow_mask, h):
@@ -219,4 +256,3 @@ def _bev_x_to_orig_line(bev_x, H_inv, bev_h):
     pts_bev = np.array([[[bev_x, 0]], [[bev_x, bev_h]]], dtype=np.float32)
     pts_orig = cv2.perspectiveTransform(pts_bev, H_inv)
     return tuple(pts_orig[0][0].astype(int)), tuple(pts_orig[1][0].astype(int))
-
