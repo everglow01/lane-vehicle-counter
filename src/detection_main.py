@@ -360,8 +360,8 @@ print(f"[Lane] 总边界数：{len(lane_boundaries_bev)}  车道数：{num_lanes
 veh_roi = np.zeros((h, w), dtype=np.uint8)
 cv2.fillPoly(veh_roi, [np.array([
     [int(w * 0.28), h],
-    [int(w * 0.36), int(h * 0.05)],
-    [int(w * 0.65), int(h * 0.05)],
+    [int(w * 0.36), int(h * 0.02)],
+    [int(w * 0.66), int(h * 0.02)],
     [int(w * 0.78), h],
 ], dtype=np.int32)], (255,))
 
@@ -439,8 +439,29 @@ bright_mask = ((V_ch > 210) & (S_ch < 60) & (veh_roi > 0)).astype(np.uint8) * 25
 bright_mask = cv2.bitwise_and(bright_mask, cv2.bitwise_not(dash_corridor))
 bright_mask = cv2.bitwise_and(bright_mask, edge_density)
 
+# 5.3.6 远处灰/白小车：顶部车辆像素少、亮度常低于 210，
+#       只在远处 ROI 内放宽亮度，并要求局部明暗对比，避免把平滑路面吞进来。
+far_roi = np.zeros((h, w), dtype=np.uint8)
+cv2.fillPoly(far_roi, [np.array([
+    [int(w * 0.34), int(h * 0.01)],
+    [int(w * 0.68), int(h * 0.01)],
+    [int(w * 0.72), int(h * 0.22)],
+    [int(w * 0.30), int(h * 0.22)],
+], dtype=np.int32)], (255,))
+local_bg = cv2.GaussianBlur(V_ch, (31, 31), 0)
+local_contrast = (cv2.absdiff(V_ch, local_bg) > 18).astype(np.uint8) * 255
+lane_corridor = cv2.dilate(lane_color_mask,
+                           cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+                           iterations=1)
+far_gray_mask = ((S_ch < 80) & (V_ch > 95) & (V_ch < 215) &
+                 (veh_roi > 0) & (far_roi > 0)).astype(np.uint8) * 255
+far_gray_mask = cv2.bitwise_and(far_gray_mask, cv2.bitwise_not(lane_corridor))
+far_gray_mask = cv2.bitwise_and(far_gray_mask, edge_density)
+far_gray_mask = cv2.bitwise_and(far_gray_mask, local_contrast)
+
 vehicle_mask = cv2.bitwise_or(dark_mask, color_mask)
 vehicle_mask = cv2.bitwise_or(vehicle_mask, bright_mask)
+vehicle_mask = cv2.bitwise_or(vehicle_mask, far_gray_mask)
 
 # 5.4 形态学：保守的闭运算，避免合并相邻车辆
 k3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -477,7 +498,9 @@ for i in range(1, n_comp):
     max_area = 3000 + int(70000 * rel_y)
     if not (min_area < area < max_area):
         continue
-    if not (0.4 < aspect < 3.0):
+    # 贴近顶部的远车常被画面上边缘截断，只剩较扁的车尾/车顶。
+    max_aspect = 4.0 if rel_y < 0.05 and area < 400 else 3.0
+    if not (0.4 < aspect < max_aspect):
         continue
     if bw > w * 0.45 or bh > h * 0.55:
         continue
@@ -512,23 +535,43 @@ for (x, y, bw, bh) in vehicles:
             lane_counts[li] += 1
             break
 
+all_lane_counts = [lane_counts.get(li, 0) for li in range(num_lanes)]
+print("[LaneCounts] " + "  ".join(
+    f"车道{li + 1}={cnt}辆" for li, cnt in enumerate(all_lane_counts)
+))
+
 
 # ═════════════════════════════════════════════════════════════
 # 7. 可视化（黄线=所有车道, 红粗线=最忙车道, 绿框=车辆）
 # ═════════════════════════════════════════════════════════════
+def extend_line_to_image(p1, p2):
+    """把已检测到的车道边界按直线延伸到画面顶/底，仅用于最终绘图。"""
+    x1, y1 = p1
+    x2, y2 = p2
+    if abs(y2 - y1) < 1e-6:
+        return p1, p2
+    x_top = int(round(x1 + (0 - y1) * (x2 - x1) / (y2 - y1)))
+    x_bot = int(round(x1 + ((h - 1) - y1) * (x2 - x1) / (y2 - y1)))
+    ok, q1, q2 = cv2.clipLine((0, 0, w, h), (x_top, 0), (x_bot, h - 1))
+    return (q1, q2) if ok else (p1, p2)
+
+lane_boundaries_draw = [
+    extend_line_to_image(p1, p2) for (p1, p2) in lane_boundaries_orig
+]
+
 # 黄色实线：所有车道边界（外侧 2 条直接用图像空间端点）
-for (p1, p2) in lane_boundaries_orig:
+for (p1, p2) in lane_boundaries_draw:
     cv2.line(output, p1, p2, (0, 255, 255), 2, cv2.LINE_AA)
 
 # 红色粗线：最忙车道左右边界
 busiest_msg = "无"
-if lane_counts and num_lanes > 0:
-    busiest = max(lane_counts, key=lambda k: lane_counts[k])
-    p1, p2 = lane_boundaries_orig[busiest]
-    p3, p4 = lane_boundaries_orig[busiest + 1]
+if num_lanes > 0:
+    busiest = int(np.argmax(all_lane_counts))
+    p1, p2 = lane_boundaries_draw[busiest]
+    p3, p4 = lane_boundaries_draw[busiest + 1]
     cv2.line(output, p1, p2, (0, 0, 255), 4, cv2.LINE_AA)
     cv2.line(output, p3, p4, (0, 0, 255), 4, cv2.LINE_AA)
-    busiest_msg = f"车道 {busiest + 1}（{lane_counts[busiest]} 辆）"
+    busiest_msg = f"车道 {busiest + 1}（{all_lane_counts[busiest]} 辆）"
     print(f"[Busiest] {busiest_msg}")
 
 # 绿色框：车辆
@@ -538,6 +581,11 @@ for (x, y, bw, bh) in vehicles:
 cv2.putText(output, f"Vehicles: {len(vehicles)}  Lanes: {num_lanes}",
             (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2,
             cv2.LINE_AA)
+lane_count_text = "Lane counts: " + "  ".join(
+    f"{li + 1}:{cnt}" for li, cnt in enumerate(all_lane_counts)
+)
+cv2.putText(output, lane_count_text, (20, 75),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2, cv2.LINE_AA)
 
 cv2.imwrite(OUT_PATH, output)
 print(f"[Output] 结果已保存：{OUT_PATH}")
