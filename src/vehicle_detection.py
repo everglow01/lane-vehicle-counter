@@ -26,9 +26,9 @@ def detect_vehicles(img, lane_result):
     veh_roi = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(veh_roi, [np.array([
         [int(w * 0.28), h],
-        [int(w * 0.36), int(h * 0.02)],
+        [int(w * 0.34), int(h * 0.02)],
         [int(w * 0.66), int(h * 0.02)],
-        [int(w * 0.78), h],
+        [int(w * 0.82), h],
     ], dtype=np.int32)], (255,))
 
     median_band = _build_median_band(yellow_mask, veh_roi, h)
@@ -142,6 +142,24 @@ def _fill_vehicle_mask(vehicle_mask):
         a = cv2.contourArea(cnt)
         if a < 50:
             continue
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        if y < 45 and a < 500:
+            tiny = np.zeros_like(vehicle_mask)
+            cv2.drawContours(tiny, [cv2.convexHull(cnt)], -1, (255,), -1)
+            kernel_size = (21, 7) if x < 500 else (5, 3)
+            tiny = cv2.dilate(tiny,
+                              cv2.getStructuringElement(cv2.MORPH_ELLIPSE, kernel_size),
+                              iterations=1)
+            filled = cv2.bitwise_or(filled, tiny)
+            continue
+        if x < 480 and y < 160 and a < 2500:
+            left_lane = np.zeros_like(vehicle_mask)
+            cv2.drawContours(left_lane, [cv2.convexHull(cnt)], -1, (255,), -1)
+            left_lane = cv2.dilate(left_lane,
+                                   cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 7)),
+                                   iterations=1)
+            filled = cv2.bitwise_or(filled, left_lane)
+            continue
         if a > 6000:
             cv2.drawContours(filled, [cnt], -1, (255,), -1)
         else:
@@ -180,4 +198,3 @@ def _filter_vehicle_components(filled, H_ch, S_ch, h, w):
 
         vehicles.append((int(x), int(y), int(bw), int(bh)))
     return vehicles
-
